@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>Document</title>
+    <style>
+        .msg{
+            font-size: 20px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+<input type="file">
+<p class="msg"></p>
+<script src="js/axios.js"></script>
+<script src="js/spark-md5.js"></script>
+<script>
+    const statusCode = {
+        UPLOAD_SUCCESS: 200,
+        NOT_UPLOAD: 202,
+        ALREADY_UPLOAD: 1000,
+        UPLOAD_FAILED: 1004
+    }
+    let chunkSize = 2 * 1024 * 1024
+    let msg = document.querySelector(".msg")
+    let file = document.querySelector("input[type='file']")
+    file.addEventListener("change", async (e) => {
+        let fileList = e.target.files
+        let file = fileList[0]
+        let chunkArr = chunk(file, chunkSize)
+        let fileHash = await hash(chunkArr)
+        let filename = file.name
+        //false:没上传 true:上传过了
+        let hasUpload = await check(fileHash, filename)
+        if (!hasUpload) {
+            let promises = []
+            for (let i = 0; i < chunkArr.length; i++) {
+                //将最后的返回结果添加到数组中
+                let res = await upload(fileHash, chunkArr, i, filename)
+                promises.push(res)
+            }
+            Promise.all(promises).then(res => {
+                mergeNotify(fileHash, filename, chunkArr.length)
+                msg.innerHTML="文件上传成功"
+                msg.style.color="green"
+            }).catch(err => {
+                console.error(err)
+            })
+        } else {
+            //文件上传过了,无需再次上传
+            msg.innerHTML="文件已经上传!!"
+            msg.style.color="red"
+        }
+
+    })
+    /**
+     *
+     * @param file 文件File对象
+     * @param chunkSize 每一个切片的大小
+     * @return {[]} 返回切片数组
+     */
+    const chunk = (file, chunkSize) => {
+        let res = []
+        for (let i = 0; i < file.size; i += chunkSize) {
+            res.push(file.slice(i, i + chunkSize))
+        }
+        return res
+    }
+    /**
+     *
+     * @param chunks 切片数组
+     * @return string 返回文件hash
+     */
+    const hash = async (chunks) => {
+        let sparkMD5 = new SparkMD5.ArrayBuffer()
+        //存储每个切片加密的任务状态,全部完成后,才会返回最终hash
+        let promises = []
+        //将切片数组所有切片转为二进制,并将其合并为一个完整文件
+        for (let i = 0; i < chunks.length; i++) {
+            //由于hash加密耗时,所以我们采用异步
+            let promise = new Promise((resolve, reject) => {
+                let fileReader = new FileReader()//使用fileReader对象将文件切片转为二进制
+                fileReader.readAsArrayBuffer(chunks[i])
+                fileReader.onload = (e) => {
+                    //添加到SparkMD5中,等所有切片添加完毕后,获取最终哈希
+                    sparkMD5.append(e.target.result)
+                    //每次添加成功后返回一个成功状态
+                    resolve()
+                }
+                fileReader.onerror = (e) => {
+                    reject(e.target.error)
+                }
+            })
+            //将该promise任务添加到promise数组中
+            promises.push(promise)
+        }
+        //当所有加密任务全都完成后,返回加密后的完整文件hash
+        return await Promise.all(promises).then(res => {
+            return sparkMD5.end()
+        }).catch(err => {
+            console.error("Hash加密出现问题")
+        })
+    }
+    /***
+     *
+     * @param hash 文件hash
+     * @param chunks 切片数组
+     * @param currentIndex 当前切片索引
+     * @param filename 文件名
+     * @return 返回Promise,用于检测当前切片是否上传成功
+     */
+    const upload = (hash, chunks, currentIndex, filename) => {
+        return new Promise((resolve, reject) => {
+            let formData = new FormData()
+            formData.append("hash", hash)
+            formData.append("chunkIndex", currentIndex)
+            formData.append("filename", filename)
+            formData.append("chunkBody", chunks[currentIndex])
+            axios.post("http://localhost:8080/upload", formData).then(res => {
+                //出现无法判断是否成功的问题,推荐判断是否成功在Promise.all中判断
+                resolve("")
+            }).catch(err => {
+                reject(err)
+            })
+        })
+    }
+    /***
+     * 通知后端接口:可以开始合并任务了
+     * @param hash 文件hash
+     * @param filename 文件名
+     */
+    const mergeNotify = (hash, filename, chunksLen) => {
+        let formData = new FormData()
+        formData.append("filename", filename)
+        formData.append("fileHash", hash)
+        formData.append("totalChunk", chunksLen)
+        axios.post("http://localhost:8080/merge", formData).then(res => {})
+    }
+    /**
+     * 检查文件是否上传
+     * @param hash 文件hash
+     * @param filename 文件名
+     * @return {Promise<Boolean>} 返回一个Promise对象
+     */
+    const check = async (hash, filename) => {
+        let formData = new FormData()
+        formData.append("filename", filename)
+        formData.append("fileHash", hash)
+        let hasUpload = axios.post("http://localhost:8080/check", formData).then(res => {
+            let result;
+            //判断是否上传过该文件
+            if (res.data.code === statusCode.NOT_UPLOAD) {
+                result = false
+            } else {
+                result = true
+            }
+            //返回promise对象
+            return Promise.resolve(result)
+        })
+        return hasUpload
+    }
+</script>
+</body>
+</html>
